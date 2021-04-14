@@ -1,0 +1,448 @@
+---
+title: "FIFA 19 - In-game player statistics' analysis using EDA and PCA"
+author: "Grzegorz Chadysz"
+date: "02.01.2020"
+output:
+  html_document:
+    theme: spacelab
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  toc_collapsed: yes
+toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=12, fig.height=8)
+```
+
+***
+
+# Introduction
+
+FIFA 19 is a last year's edition of a popular, yearly released, football simulator video game serie. It provides multiple game modes, both single player and online ones. Those include one-on-one football matches, co-operation matches with others or building "fantasy" teams and compete with them online. This particular mode is probably the heart and soul of the series and is called FIFA Ultimate Team (FUT). It is based around the idea of a trading card game, where each of your players is a card and you build a deck (team) with the cards you own. You can sell or buy players on the transfer market (consisting of cards listed by other gamers) or buy "packs". Those can be bought with in-game currency earned through playing games or with real money. 
+
+All real world football players that are included in the game (roughly 18,000) are described by a set of statistics and characteristics, which determine how good they are in-game. Main indicator of the quality of a player is his "overall" score, which is a net of all his statistics. There are 34 of them with values in the (0,99> interval, in which 5 are used to describe goalkeeping abilities and 29 are used to describe abilities of an outfield player. All the players are described by all 34 stats, but goalkeeping abilities have no impact on outfield player's overall and vice versa. 
+
+Since the players in FUT are presented as cards, it would be difficult to show all the statistics on the face of the card. Thus, there are so called "Face stats". The card shows only six statistics on it to make it more readable. The statistics are linear combinations of the ones already mentioned. For example, instead of having both *Acceleration* and *SprintSpeed* displayed on the card, the game utilizes *pace* statistic which is a weighted sum of those two. More on that in the following chapter.
+
+In this paper I will try to find whether, based on players' attributes, are there certain categories into which players can be divided, and if so: what attributes define certain class. Moreover, I will compare the results with the mentioned before face stats and see whether they have bear some similarities.
+
+It is worth noting that all those statistics are suggested mostly by a 6,000 group of volunteers led by Head of Data Collection & Licensing. More on that [here](https://www.goal.com/en-gb/news/fifa-player-ratings-explained-how-are-the-card-number-stats/1hszd2fgr7wgf1n2b2yjdpgynu).
+
+***
+
+# Datasets 
+
+## Main dataset {.tabset .tabset-fade .tabset-pills}
+
+The dataset consists of 18,147 players (after dropping 60 *NAs*) which are real world footballers translated into FIFA game engine by EA Sports. It was downloaded from [Kaggle](https://www.kaggle.com/karangadiya/fifa19). Before we take a first look at the summarized statistics I will list below the packages that helped greatly during the process of analysis. 
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+library(knitr)
+library(kableExtra)
+library(tidyr)
+library(dplyr)
+library(GGally)
+library(gridExtra)
+library(FactoMineR)
+library(corrplot)
+library(purrr)
+library(factoextra)
+library(labdsv)
+library(maptools)
+library(psych)
+library(ClusterR)
+```
+
+The dataset that will be used in this paper is one that has already been subset from the original one which has around 90 variables. It consisted of many useless to this study ones, such as whether the player has in-game face scan or just a generic game engine generated face. What could have had potential impact in this study was a set of four categorical variables describing players. Those were:
+
+- *Skills* - Rated in stars, min 1 star, max 5 stars; determines player's ability to pull off skill moves, like the famous roulette
+- *Weak foot* - Rated in stars, min 1 star, max 5 stars; determines player's ability to pass, shoot, etc. with his not-preferred foot correctly
+- *Attacking workrate* - Can be either High, Medium or Low; determines how much does the player run in attacking zones of the pitch
+- *Defensive workrate* - Can be either High, Medium or Low; determines how much does the player run in defensive zones of the pitch
+
+I decided to leave them out, because they don't follow the same pattern as the ones mentioned before. They are also much less precise, having only 3 or 5 levels.
+
+Most statistics are pretty self-explanatory with the exception of *FKAccuracy*, which stands for *Free Kick Accuracy* - how well one can shoot from this set piece. Also, position refers to players' preferred positions on the pitch and the game recognizes 28 different ones.
+
+```{r, echo=FALSE}
+all_players <- read.csv('C:\\Users\\Grzesiek\\Desktop\\Data Science\\Unsupervised Learning\\Second Paper\\fifa19.csv',
+                        sep = ',', encoding = "UTF-8")
+all <- all_players %>% drop_na()
+all <- all[,2:89]
+all[,"Name"] <- as.character(all[,"Name"])
+#all[,"Position"] <- as.character(all[,"Position"])
+all <- all %>% mutate(Total=rowSums(.[54:87]))
+
+stats <- all[,c(2, 21, 54:87, 89)]
+```
+
+### Preview
+
+```{r}
+kable(stats[1:5,], caption="Preview of the main dataset") %>%
+  kable_styling(bootstrap_options=c("striped", "hover")) %>%
+  scroll_box(width="780px")
+```
+
+### Summary
+
+```{r}
+kable(summary(stats), caption="Summary of the main dataset") %>%
+  kable_styling(bootstrap_options=c("striped", "hover")) %>%
+  scroll_box(width="780px")
+```
+
+## Face stats subset {.tabset .tabset-fade .tabset-pills}
+
+As I mentioned before in the Introduction chapter, there is a simplification of the 29 statistics to just 6, which are calculated as shown below. The calculations will be done only to outfield players, due to the fact that goalkeepers stats are their face stats since they have only 5 goalkeeper-specific stats. The formula for calculating each face stat was provided by EA Sports. [Here](https://www.fifauteam.com/player-ratings-guide-fifa-19/) is a link to the page showing those weights as well as thoroughly explaining cards in FUT.
+
+```{r}
+outfield_stats <- stats[stats$Position!="GK", c(1:31, 37)]
+
+face_stats <- matrix(nrow=nrow(outfield_stats), ncol=7)
+face_stats <- data.frame(face_stats) 
+colnames(face_stats) <- c("Name", "Pace", "Shooting", "Passing", "Dribbling", "Defending", "Physical")
+
+face_stats[,1] <- outfield_stats[,"Name"]
+
+# Formulas
+face_stats[,2] <- outfield_stats[,"Acceleration"]*0.45 + outfield_stats[,"SprintSpeed"]*0.55 
+
+face_stats[,3] <- outfield_stats[,"Finishing"]*0.45 + outfield_stats[,"LongShots"]*0.20 + 
+                  outfield_stats[,"Penalties"]*0.05 + outfield_stats[,"Positioning"]*0.05 +
+                  outfield_stats[,"ShotPower"]*0.20 + outfield_stats[,"Volleys"]*0.05
+
+face_stats[,4] <- outfield_stats[,"Crossing"]*0.20 + outfield_stats[,"Curve"]*0.05 + 
+                  outfield_stats[,"FKAccuracy"]*0.05 + outfield_stats[,"LongPassing"]*0.15 +
+                  outfield_stats[,"ShortPassing"]*0.35 + outfield_stats[,"Vision"]*0.20
+
+face_stats[,5] <- outfield_stats[,"Agility"]*0.10 + outfield_stats[,"Balance"]*0.05 + 
+                  outfield_stats[,"BallControl"]*0.35 + outfield_stats[,"Composure"]*0.00 +
+                  outfield_stats[,"Dribbling"]*0.50 + outfield_stats[,"Reactions"]*0.00
+
+face_stats[,6] <- outfield_stats[,"StandingTackle"]*0.30 + outfield_stats[,"Marking"]*0.30 + 
+                  outfield_stats[,"SlidingTackle"]*0.10 + outfield_stats[,"Interceptions"]*0.20+
+                  outfield_stats[,"HeadingAccuracy"]*0.10
+
+face_stats[,7] <- outfield_stats[,"Strength"]*0.50 + outfield_stats[,"Stamina"]*0.25 + 
+                  outfield_stats[,"Jumping"]*0.05 + outfield_stats[,"Aggression"]*0.20
+
+face_stats <- face_stats %>% mutate(TotalFS=rowSums(.[2:7]))
+
+```
+
+### Preview
+
+```{r, echo = FALSE}
+kable(face_stats[1:5,], caption="Preview of the face stats dataset") %>%
+  kable_styling(bootstrap_options=c("striped", "hover")) 
+```
+
+The cards in game have their face stats rounded to integers, but since I have no information how does EA Sports round them and it does not seem like a big difference in terms of later calculations, I will leave them as they are.
+
+***
+
+### Summary
+
+```{r, echo = FALSE}
+kable(summary(face_stats), caption="Summary of the face stats dataset") %>%
+  kable_styling(bootstrap_options=c("striped", "hover")) 
+```
+
+The cards in game have their face stats rounded to integers, but since I have no information how does EA Sports round them and it does not seem like a big difference in terms of later calculations, I will leave them as they are.
+
+***
+
+# Visual data analysis
+
+## Correlation plot {.tabset .tabset-fade .tabset-pills}
+
+What we can check at first is whether there are correlations between the statistics. I will keep goalkeepers included to see if the results are sensible. We should see that goalkeeper-specific attributes are positively correlated between themselves and negatively with other attributes. From now on, most calculations will be also done for face stats subset (reminder: it contains *no* goalkeepers).
+
+### Main 
+
+```{r}
+corr_all = cor(stats[,3:37], method='pearson')
+corrplot(corr_all)
+```
+
+As we can see, the assumptions were quite right. There are many correlations between the statistics with the most noticeable being between *Acceleration* and *SprintSpeed* or *StandingTackle* and *SlidingTackle*. What is interesting is that Total sum of attributes is highly correlated with *BallControl*, *ShortPassing*, *Dribbling* and *Crossing*. It would suggest that those statistics have high positive impact on the Total. Goalkeepers, on the other hand, tend to have low Total because of their poor outfield skills - they are good only at goalkeeping (which is rather expected).
+
+### Face stats
+
+```{r}
+corr_fs = cor(face_stats[,2:8], method='pearson')
+corrplot(corr_fs)
+```
+
+We can observe that there are both positive and negative correlations. *Dribbling* seems to be strongly correlated with *Pace*, *Shooting* and *Passing*. *Defending* is positively correlated with *Physical* attributes and negatively with most of the rest. That would suggest that defenders are strong and defensively solid but lack other qualities. What is worth noting is that when it comes to *TotalFS* (total face stats), *Passing* has the strongest positive correlation, which could imply the importance of ability to pass well regardless of position.
+
+## Distributions
+
+Since goalkeepers could be treated as one variable (strongly negatively correlated with others) they will be omitted in the following chapters. There is no need in reducing dimensions for goalkeeping attributes as we can clearly see from correlation plot - they would certainly create one component and probably influence negatively the rest of study. Moreover, gamers have little to no control over their keepers in game, so their attributes make unknown impact and could produce random results.
+
+### Positions
+
+To get more insight on the data one can definitely take a look at the distribution of variables. First of all, it would be helpful to know whether there are similar numbers of players in symmetrical positions (e.g. left midfielder and right midfielder or left back and right back). To show this we can incorporate a bar plot.
+
+```{r}
+ggplot(outfield_stats) + geom_bar(aes(x = Position), fill = "Blue")
+```
+
+Position acronyms are constructed in a certain way:
+
+- If first letter is L/R it stands for left and right side of the pitch
+- If second letter is A/C/M it stands for attacking, centre (central) or defensive position
+- B stands for Back (defender), M for Midfielder, W for Wing or Winger and F for Forward (ST stands for striker)
+
+So, for example, a player with LDM assigned to them would preferably play as left defensive midfielder.
+
+Going back to the bar plot, we can see that there are similar counts of footballers playing "mirror" positions (LW and RW, LB and RB and so on). However we can argue that there is significantly less CB (centre backs) compared to ST. What's more, most teams play formations with two CBs and rarely more than one ST. Apart from that, there seems to be no significant skew towards any of the sides.
+
+### Attributes {.tabset .tabset-fade .tabset-pills}
+
+We can also take a look at the distribution of players' statistics, both face stats and "raw" stats. It may give some valuable insight into how certain stats behave generally, maybe they come from a known distribution (like normal distribution).
+
+#### Main 
+
+```{r fig1, fig.height = 7, fig.width = 8, warning=FALSE}
+vline_means <- data.frame(key=colnames(outfield_stats[,3:32]),
+                          y=colMeans(outfield_stats[,3:32]))
+
+outfield_stats %>%
+  keep(is.numeric) %>%                     
+  gather() %>%                            
+  ggplot(aes(value)) +                     
+    facet_wrap(~ key, scales = "free", ncol = 5) +   
+    geom_density(color = "darkblue", fill = "lightblue") +
+    geom_vline(aes(xintercept = y), data = vline_means,
+                    color = "black", linetype = "dashed", size = 0.5)
+
+```
+
+What we can see from these plots is that most of the distributions are skewed to the right suggesting that there are more players having "above-average" than "below-average" attributes. Also, attributes that describe strictly defending skills (e.g. *Tackles*), as well as those depicting attacking skills (e.g. *Finishing*) seem to have two peaks. It could be explained by the differences between defenders and strikers which tend to have one stat extraordinarily high and other extraordinarily low. While most of the statistics' means appear to fluctuate between 50 and 60 there are two which have lower means. One of which is *FKAccuracy* and the other is *Volleys*. In real world, both are thought to be exquisite skills, which have been been mastered by few. Such distributions seem to support that, showing that, generally speaking, not many are capable of shooting well straight from air or from free kick.
+
+***
+
+#### Face stats
+
+```{r fig2, fig.height = 7, fig.width = 8, warning=FALSE}
+vline_means_fs <- data.frame(key=colnames(face_stats[,2:8]),
+                             y=colMeans(face_stats[,2:8]))
+
+face_stats %>%
+  keep(is.numeric) %>%                     
+  gather() %>%                            
+  ggplot(aes(value)) +                     
+    facet_wrap(~ key, scales = "free") +   
+    geom_density(color = "darkblue", fill = "lightblue") +
+    geom_vline(aes(xintercept = y), data = vline_means_fs,
+                    color = "black", linetype = "dashed", size = 0.5)
+```
+
+Similarily to the Main plots, Shooting and especially Defending seem to have two peaks. It was expected as Face stats are a linear combination of Main stats. From this distributions we can also see that the percentage of players with really low other attributes (below 40) is extremely small. That means that either there is a threshold for the players' overalls, where they can't go any lower and are artifically "boosted" or that those lower overalls are perhaps reserved for lower league players, should EA choose to add them in the next installations of the game without the neccessity to alter whole grading system.
+
+***
+
+# Prime Component Analysis 
+
+In this chapter, main goal is to reduce the number of attributes, so that they could be interpreted more easily as groups. I would also like to see whether reducing number of dimensions to 6 (so the number of Face stats) would result in similar grouping as this proposed by EA. First of all, we take all the attributes and scale them as PCA is easily influenced by magnitude. Analysis for Main stats and Face stats will be divided into sub-chapters unlike before, due to the amount of output for each of them (and then the inevitable need to scroll back to swap the dataset).
+
+## Main stats {.tabset .tabset-fade .tabset-pills}
+
+Apart from the reduction to 6 dimensions as I mentioned before, it would be good to know the optimal number of dimensions according to the eigenvalues. One can use a method which rules out all the components with eigenvalues below 1 (Kaiser criterion), one which takes number of components to describe a certain amount of variance, use MAP test or use parallel analysis.
+
+```{r}
+pca_os <- prcomp(outfield_stats[,3:31], center=TRUE, scale=TRUE)
+
+p1_os <- fviz_eig(pca_os, choice='eigenvalue')
+p2_os <- fviz_eig(pca_os)
+grid.arrange(p1_os, p2_os, nrow=1)
+```
+
+Left plot shows the eigenvalues for each component and if we obeyed the Kaiser criterion we should take 4 components as the fourth one is below the value of 1. Looking at the right plot we can make similar call: the drop of variance explained from 4th to 5th component is a significant one. We can also take a look at exact values behind these two plots. 
+
+```{r}
+p1_os$data
+summary(pca_os)
+```
+
+We get clear information about the eigenvalues, but the variance explained by each component gives no unambiguous answer. Difference between 3rd and 4th component is not that much higher than between 4th and 5th, yet still seems significant compared to the rest. It could be argued that taking the first two or three components explains a sufficent amount of variance (around 60% and 70% respectively).
+
+```{r}
+p3_os <- fviz_pca_var(pca_os, col.var = "dodgerblue1", repel = TRUE)
+p4_os <- fviz_pca_ind(pca_os, col.ind = "cos2", geom = "point", gradient.cols = c("yellow", "blue"))
+grid.arrange(p3_os, p4_os, nrow=1)
+```
+
+Above, on the left hand side we can see the graphical representation of relations between variables, where positively correlated variables are grouped together, while negatively correlated variables are positioned on opposite sides of the plot. It is clear that variables describing defensive stats are positively correlated with each other and negatively with most of the others. On the right hand side the plot shows a quality of representation of individual observations. 
+
+Albeit nice-looking, it gives less insight than rotated PCA, results of which will be shown below. It will enable us to specify the number of groups we want to "accumulate" the variables into. Also, it will let us see which variables create which group and show their influence on it. As I mentioned before, computed will be a scenario with 6 factors and arbitrarily chosen 2 (lowest number of groups) and 3 (solid 70% of variance explained, while adding next component makes no enough of a improvement).
+
+### 2 factors
+
+```{r}
+p5_os <- principal(outfield_stats[,3:31], nfactors=2, rotate="varimax")
+print(loadings(p5_os), digits=2, cutoff=0.4, sort=TRUE)
+```
+
+Having only two groups caused a division that can be summarized as a "attacker/defender" distinction. First component is comprised of technical skills, shooting skills and overall pace. These are characteristics describing players from central midfielder to winger to striker, whereas second component consists mostly defending and passing skills which are a neccessity for defensive-minded players like defensive midfielders, centre backs and full backs.
+
+### 3 factors
+
+```{r}
+p6_os <- principal(outfield_stats[,3:31], nfactors=3, rotate="varimax")
+print(loadings(p6_os), digits=2, cutoff=0.4, sort=TRUE)
+```
+
+This output is somewhat more interesting as it creates a clearer division. First component now seems to lack wingers (no pace statistic included) and be more centre-of-pitch oriented. Second component is even more defensive as it now is negatively correlated with *Finishing*, which implies that players of that group are particularly bad at this aspect of play. Third component describes what is most commonly called a winger, but can also be a left/right midfielder. Pace, *Crossing* and *Dribbling* are his trademarks while *Strength* is really poor (slicker players tend to be faster and stocky players tend to be slower).
+
+### 6 factors
+
+```{r}
+p7_os <- principal(outfield_stats[,3:31], nfactors=6, rotate="varimax")
+print(loadings(p7_os), digits=2, cutoff=0.4, sort=TRUE)
+```
+
+Here we can see that having 6 components was an overkill, as the 6th one has no significant variable at this cutoff point. The first three components are very similar to previous calculations (although RC4 became RC3). Fourth component (RC3) is now describing the stocky, strong players. They are aggresive and bully their opponents with sheer strength, but have low balance and agility, hence my assumption that this component describes exceptionally tall players. Fifth component consists solely of jumping, which might suggest that there is a group of players with a high "jumping to rest of attributes" ratio.
+
+## Face stats {.tabset .tabset-fade .tabset-pills}
+
+```{r}
+pca_fs <- prcomp(face_stats[,2:7], center=TRUE, scale=TRUE)
+
+p1_fs <- fviz_eig(pca_fs, choice='eigenvalue')
+p2_fs <- fviz_eig(pca_fs)
+grid.arrange(p1_fs, p2_fs, nrow=1)
+```
+
+When it comes to Face stats, we only have 6 variables to begin with but nonetheless we want to reduce their number even more. From the left scree plot we would (according to eigenvalue > 1 criterion) take only first two components. From the right plot we can see that they would explain around 80% of variance which is a relatively big amount. To see exact values from each plot we can call this command:
+
+```{r}
+p1_fs$data
+summary(pca_fs)
+```
+
+It confirms the estimations we made just from graphical analysis. However we can see that third component maybe should be taken into consideration as it explains almost 12% of variance.
+
+```{r}
+p3_fs <- fviz_pca_var(pca_fs, col.var = "dodgerblue1", repel = TRUE)
+p4_fs <- fviz_pca_ind(pca_fs, col.ind = "cos2", geom = "point", gradient.cols = c("yellow", "blue"))
+grid.arrange(p3_fs, p4_fs, nrow=1)
+```
+
+Correlation diagram looks extremely similar to the one based on Main stats, although it is symmetrically rotated along x axis. The same rotation occured within second plot, as one can see from the location of the "bite mark".
+
+Analogically to what we did with Main stats, we will now try and look at rotated components to get clearer view on what are the groups and shares of variables in them. This time there will also be three scenarios: for 2, 3 and 4 components. Reasoning behind this choice is similar, so lowest possible number of groups, adding next explains solid 87% of variance. Fourth is added of curiosity as it explains 96%, but is not expected to provide some interesting information, as grouping 6 variables into 4 groups does not seem to provide good distinctions.
+
+### 2 factors
+
+```{r}
+p5_fs <- principal(face_stats[,2:7], nfactors=2, rotate="varimax")
+print(loadings(p5_fs), digits=2, cutoff=0.4, sort=TRUE)
+```
+
+Dividing Face stats into 2 groups gives a similar distinction as that for Main stats, so between attackers and physical defenders. 
+
+***
+
+### 3 factors
+
+```{r}
+p6_fs <- principal(face_stats[,2:7], nfactors=3, rotate="varimax")
+print(loadings(p6_fs), digits=2, cutoff=0.4, sort=TRUE)
+```
+Division into 3 groups shows us that the first contains "technical" players, which are good with the ball, second group remains as strong defenders and third one describes quick, pacy players.
+
+***
+
+### 4 factors
+
+```{r}
+p7_fs <- principal(face_stats[,2:7], nfactors=4, rotate="varimax")
+print(loadings(p7_fs), digits=2, cutoff=0.4, sort=TRUE)
+```
+
+Division presented above follows the trend of the Main stats. It also describes defenders as a net of positive defending factor and negative shooting factor. Next component is made of strictly physical players, while last one remained with pacy players.
+
+***
+
+# Clustering PCA results {.tabset .tabset-fade .tabset-pills}
+
+Now we will try to cluster PCA results for both Main and Face stats. Although different numbers of components have been taken into consideration in this paper, now we will calculate only for number of components equal to 2. To see how each variable affects the first two components we can use the contrib properties of PCA analysis. The barplots will show the percentage of contribution of variables to the component
+
+Having that knowledge we will be able now to cluster the results and interpret them, knowing that x and y axes are going to be described by those components. I decided to create 5 clusters as the number seems reasonable to describe such big dataset, as well as provide some interesting distinctions.
+
+## Main stats
+
+```{r}
+main_stats_cs <- center_scale(outfield_stats[,3:31]) 
+ms_pca <- princomp(main_stats_cs)$scores[,1:2] 
+ms_km <- KMeans_rcpp(ms_pca, clusters=5, num_init=5, max_iters=10000) 
+
+a <- ggplot(as.data.frame(ms_pca)) +
+      geom_point(aes(x = Comp.1, y = Comp.2, color = factor(ms_km$clusters), shape = factor(ms_km$clusters))) +
+      theme(legend.position = "none") +
+      ggtitle("Main stats clusters")
+
+#var <- get_pca_var(pca_os)
+
+c1 <- fviz_contrib(pca_os, "var", axes=1)
+c2 <- fviz_contrib(pca_os, "var", axes=2)
+
+grid.arrange(c1, c2, top='Contribution to the Principal Components')
+```
+
+
+## Face stats
+
+```{r}
+face_stats_cs <- center_scale(face_stats[,2:7]) 
+fs_pca <- princomp(face_stats_cs)$scores[,1:2] 
+fs_km <- KMeans_rcpp(fs_pca, clusters=5, num_init=5, max_iters=10000) 
+
+b <- ggplot(as.data.frame(fs_pca)) +
+      geom_point(aes(x = Comp.1, y = Comp.2, color = factor(fs_km$clusters), shape = factor(fs_km$clusters))) +
+      theme(legend.position = "none") +
+      ggtitle("Face stats clusters")
+
+#var <- get_pca_var(pca_fs)
+
+d1 <- fviz_contrib(pca_fs, "var", axes=1)
+d2 <- fviz_contrib(pca_fs, "var", axes=2)
+
+grid.arrange(d1, d2, top='Contribution to the Principal Components')
+```
+
+# {.toc-ignore}
+
+```{r fig3, fig.height = 8, fig.width = 8}
+grid.arrange(a, b, nrow = 2)
+```
+
+As we can see from these plots, they are visually simmetrical along the invisible axis that separates the plots. From "Main stats clusters" plot we can see that the two clusters closest to the origin (fuchsia and mustard coloured) show, generally speaking, worse players, those that are not particularly good at anything. Pink cluster is comprised of the good, balanced (in terms of defense and offense) players. Green cluster shows average, but attacking-minded players, while blue one shows the best attacking players. 
+
+The analysis of "Face stats clusters" is analogical, but rotated along x axis, so I won't be repeating what was already stated, changing the colors of clusters. The further along x axis, the more technically and offensively skilled the player. The further along y axis, the more defensively and physically skilled the player.
+
+***
+
+# Summary
+
+First of all, we could see that there was a great similarity to the analysis of Main stats and Face stats. Although it was expected to some extent, as the latter is a linear combination of the former, I did not expect the magnitude of similarity. It might suggest, that EA while creating Face stats' formulas, did something similar and based on some component or clustering analysis to find which attributes are correlated the most or which form certain clusters. 
+
+Either way, PCA analysis showed that players can be "branded" as members of few categories. It obviously depended on the number of components taken into consideration, but, generally, the main division that could be extracted from the study was into:
+
+- Offensive, technical players
+- Defensive players
+- Fast, dribbling players
+
+Also we could gather some information about those groups. For example, a player belonging to a defensive group tends to be bad at almost every other aspect of the game (aside from passing). On the other hand, fast players are usually very weak physically.
+
+The distributions of the attributes showed that there is a certain amount of skew towards above avarage values - peak of the distribution was often to the right of mean value. *Shooting* and *Defending* had somewhat two-peak distributions, which indicated that these contain extremely position-specific attributes (those attributes themselves also tended to have similar distributions).
+
+Clustering showed that when PCA was applied, and players where described by two components, they could be further grouped into clusters, which showed that they could now be distinguished between themselves according to their "level". In other words, they could be classified, by the amount of skills they possessed. The better the player, the further to the top-right corner of the plot cluster he got.
+
